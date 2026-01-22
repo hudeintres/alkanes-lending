@@ -1,7 +1,6 @@
 use anyhow::Result;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use hex;
 use std::env;
 use std::fs;
 use std::io::prelude::*;
@@ -103,20 +102,18 @@ fn main() {
                     .to_str()
                     .unwrap()
             );
-            let f: Vec<u8> = fs::read(
-                &Path::new(&wasm_str)
-                    .join("wasm32-unknown-unknown")
-                    .join("release")
-                    .join(subbed.clone() + ".wasm"),
-            )?;
+            let file_path = Path::new(&wasm_str)
+                .join("wasm32-unknown-unknown")
+                .join("release")
+                .join(subbed.clone() + ".wasm");
+            let f: Vec<u8> = fs::read(&file_path)?;
             let compressed: Vec<u8> = compress(f.clone())?;
             fs::write(&Path::new(&wasm_str).join("wasm32-unknown-unknown").join("release").join(subbed.clone() + ".wasm.gz"), &compressed)?;
-            let data: String = hex::encode(&f);
             fs::write(
                 &write_dir.join("std").join(subbed.clone() + "_build.rs"),
-                String::from("use hex_lit::hex;\n#[allow(long_running_const_eval)]\npub fn get_bytes() -> Vec<u8> { (&hex!(\"")
-                    + data.as_str()
-                    + "\")).to_vec() }",
+                String::from("pub fn get_bytes() -> Vec<u8> { include_bytes!(\"")
+                    + file_path.as_os_str().to_str().unwrap()
+                    + "\").to_vec() }",
             )?;
             eprintln!(
                 "build: {}",
