@@ -412,11 +412,58 @@ fn test_case1_full_loan_lifecycle() -> Result<()> {
         "Debitor should get collateral back after repayment"
     );
     
-    // Creditor receives repayment (we have both loan tokens returned + repayment sent to creditor)
-    // The output should have the remaining loan tokens after paying repayment
+    // ========== STEP 5: Creditor claims repayment (after duration) ==========
+    println!("\n=== STEP 5: ClaimRepayment ===");
+    
+    // Advance height past duration (start was ~840003, deadline ~841259)
+    let claim_height = 840_004 + DURATION_BLOCKS + 10;
+    let claim_cellpack = Cellpack {
+        target: lending_id.clone(),
+        inputs: vec![9], // opcode: ClaimRepayment
+    };
+    
+    // cast to u32 for test helpers (safe as value fits)
+    let claim_height_u32: u32 = claim_height.try_into().unwrap();
+    let mut block5 = create_block_with_coinbase_tx(claim_height_u32);
+    let outpoint5 = OutPoint {
+        txid: block4.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+    
+    block5.txdata.push(
+        alkane_helpers::create_multiple_cellpack_with_witness_and_in(
+            Witness::new(),
+            vec![claim_cellpack],
+            outpoint5,
+            false,
+        ),
+    );
+    
+    index_block(&block5, claim_height_u32)?;
+    
+    let sheet5 = get_last_outpoint_sheet(&block5)?;
+    let collateral_after_claim = sheet5.get(&collateral_token.into());
+    let loan_after_claim = sheet5.get(&loan_token.into());
+    
+    println!("Collateral after claim: {}", collateral_after_claim);
+    println!("Loan tokens after claim: {} (received {})", loan_after_claim, repayment_amount);
+    
+    // Collateral stays returned
+    assert_eq!(
+        collateral_after_claim, 
+        INIT_TOKEN_SUPPLY,
+        "Collateral remains with debitor/creditor"
+    );
+    // Creditor gets repayment back (loan tokens restored)
+    assert_eq!(
+        loan_after_claim, 
+        INIT_TOKEN_SUPPLY,
+        "Creditor should receive repayment after duration"
+    );
+    
     println!("\n=== LOAN COMPLETED SUCCESSFULLY ===");
-    println!("Final collateral balance: {}", collateral_after_repay);
-    println!("Final loan token balance: {}", loan_after_repay);
+    println!("Final collateral balance: {}", collateral_after_claim);
+    println!("Final loan token balance: {}", loan_after_claim);
     
     Ok(())
 }
@@ -627,6 +674,59 @@ fn test_case2_full_loan_lifecycle() -> Result<()> {
     println!("\n=== LOAN COMPLETED SUCCESSFULLY ===");
     println!("Final collateral balance: {}", collateral_after_repay);
     println!("Final loan token balance: {}", loan_after_repay);
+    
+    // ========== STEP 4: Creditor claims repayment (after duration) ==========
+    println!("\n=== STEP 4: ClaimRepayment ===");
+    
+    // Advance height past duration (start was ~840002, deadline ~840002+5256)
+    let claim_height = 840_003 + DURATION_BLOCKS + 10;
+    let claim_cellpack = Cellpack {
+        target: lending_id.clone(),
+        inputs: vec![9], // opcode: ClaimRepayment
+    };
+    
+    // cast to u32 for test helpers (safe as value fits)
+    let claim_height_u32: u32 = claim_height.try_into().unwrap();
+    let mut block4 = create_block_with_coinbase_tx(claim_height_u32);
+    let outpoint4 = OutPoint {
+        txid: block3.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+    
+    block4.txdata.push(
+        alkane_helpers::create_multiple_cellpack_with_witness_and_in(
+            Witness::new(),
+            vec![claim_cellpack],
+            outpoint4,
+            false,
+        ),
+    );
+    
+    index_block(&block4, claim_height_u32)?;
+    
+    let sheet4 = get_last_outpoint_sheet(&block4)?;
+    let collateral_after_claim = sheet4.get(&collateral_token.into());
+    let loan_after_claim = sheet4.get(&loan_token.into());
+    
+    println!("Collateral after claim: {}", collateral_after_claim);
+    println!("Loan tokens after claim: {} (received {})", loan_after_claim, repayment_amount);
+    
+    // Collateral stays returned
+    assert_eq!(
+        collateral_after_claim, 
+        INIT_TOKEN_SUPPLY,
+        "Collateral remains with debitor/creditor"
+    );
+    // Creditor gets repayment back (loan tokens restored)
+    assert_eq!(
+        loan_after_claim, 
+        INIT_TOKEN_SUPPLY,
+        "Creditor should receive repayment after duration"
+    );
+    
+    println!("\n=== LOAN COMPLETED SUCCESSFULLY ===");
+    println!("Final collateral balance: {}", collateral_after_claim);
+    println!("Final loan token balance: {}", loan_after_claim);
     
     Ok(())
 }

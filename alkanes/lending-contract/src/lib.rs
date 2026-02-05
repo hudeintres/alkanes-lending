@@ -104,6 +104,10 @@ pub enum LendingContractMessage {
     #[opcode(8)]
     CancelLoanOffer,
 
+    /// Creditor claims loan token after duration
+    #[opcode(9)]
+    ClaimRepayment,
+
     /// Forward incoming tokens (utility)
     #[opcode(50)]
     ForwardIncoming,
@@ -455,10 +459,10 @@ impl LendingContract {
         let collateral_amount = self.collateral_amount();
         let _creditor = self.creditor()?;
 
-        // Collect repayment
+        // Collect repayment (held for creditor claim)
         let (_, mut response) = self.collect_incoming_tokens(loan_token.clone(), repayment_amount)?;
 
-        // Mark loan as repaid
+        // Mark as repaid
         self.set_state_value(STATE_LOAN_REPAID);
 
         // Return collateral to debitor
@@ -467,12 +471,7 @@ impl LendingContract {
             value: collateral_amount,
         });
 
-        // Send repayment to creditor (we store it in contract, creditor can claim)
-        // For simplicity, we'll send the repayment directly
-        response.alkanes.pay(AlkaneTransfer {
-            id: loan_token,
-            value: repayment_amount,
-        });
+        // repayment stays in contract for ClaimRepayment after duration
 
         Ok(response)
     }
@@ -508,6 +507,39 @@ impl LendingContract {
         response.alkanes.pay(AlkaneTransfer {
             id: collateral_token,
             value: collateral_amount,
+        });
+
+        Ok(response)
+    }
+
+    /// Creditor claims loan token (repayment + interest) after duration
+    fn claim_repayment(&self) -> Result<CallResponse> {
+        let state = self.state_value();
+        if state != STATE_LOAN_REPAID {
+            return Err(anyhow!("Loan not repaid"));
+        }
+
+        // Verify caller is creditor
+        let creditor = self.creditor()?;
+        if self.caller()? != creditor {
+            return Err(anyhow!("Only creditor can claim"));
+        }
+
+        // After duration
+        let deadline = self.repayment_deadline();
+        let current_block = self.current_block();
+        if current_block < deadline {
+            return Err(anyhow!("Duration not ended"));
+        }
+
+        let loan_token = self.loan_token()?;
+        let repayment_amount = self.calculate_repayment_amount()?;
+
+        // Transfer to creditor
+        let mut response = self.refund_all_incoming()?;
+        response.alkanes.pay(AlkaneTransfer {
+            id: loan_token,
+            value: repayment_amount,
         });
 
         Ok(response)
