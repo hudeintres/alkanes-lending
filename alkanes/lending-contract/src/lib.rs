@@ -1,4 +1,4 @@
-use alkanes_runtime::{declare_alkane, message::MessageDispatch, runtime::AlkaneResponder};
+use alkanes_runtime::{auth::AuthenticatedResponder, declare_alkane, message::MessageDispatch, runtime::AlkaneResponder};
 
 #[allow(unused_imports)]
 use alkanes_runtime::{
@@ -109,6 +109,7 @@ pub struct LendingContract();
 
 impl MintableToken for LendingContract {}
 impl AlkaneResponder for LendingContract {}
+impl AuthenticatedResponder for LendingContract {}
 
 impl LendingContract {
     // ============ Storage Variables (using alkanes-macros) ============
@@ -130,10 +131,6 @@ impl LendingContract {
     // Loan timing
     storage_variable!(loan_start_block: u128);
     storage_variable!(repayment_deadline: u128);
-    
-    // Participants
-    storage_variable!(debitor: AlkaneId);
-    storage_variable!(creditor: AlkaneId);
 
     // ============ Helper Functions ============
 
@@ -243,7 +240,7 @@ impl LendingContract {
         }
 
         // Collect loan tokens from creditor
-        let (_, response) = self.collect_incoming_tokens(loan_token.clone(), loan_amount)?;
+        let (_, mut response) = self.collect_incoming_tokens(loan_token.clone(), loan_amount)?;
 
         // Store loan parameters
         self.set_collateral_token(collateral_token);
@@ -252,7 +249,7 @@ impl LendingContract {
         self.set_loan_amount(loan_amount);
         self.set_duration_blocks(duration_blocks);
         self.set_apr(desired_apr);
-        self.set_creditor(self.caller()?);
+        response.alkanes.pay(self.deploy_self_auth_token(1)?);
         self.set_state_value(STATE_WAITING_FOR_DEBITOR_TAKE);
 
         Ok(response)
@@ -280,8 +277,7 @@ impl LendingContract {
             .checked_add(duration)
             .ok_or_else(|| anyhow!("Overflow calculating deadline"))?;
 
-        // Store debitor and start loan
-        self.set_debitor(self.caller()?);
+        // Start loan
         self.set_loan_start_block(current_block);
         self.set_repayment_deadline(deadline);
         self.set_state_value(STATE_LOAN_ACTIVE);
@@ -304,12 +300,6 @@ impl LendingContract {
             return Err(anyhow!("No active loan to repay"));
         }
 
-        // Verify caller is the debitor
-        let debitor = self.debitor()?;
-        if self.caller()? != debitor {
-            return Err(anyhow!("Only the debitor can repay the loan"));
-        }
-
         // Check deadline hasn't passed
         let deadline = self.repayment_deadline();
         let current_block = self.current_block();
@@ -321,7 +311,6 @@ impl LendingContract {
         let repayment_amount = self.calculate_repayment_amount()?;
         let collateral_token = self.collateral_token()?;
         let collateral_amount = self.collateral_amount();
-        let _creditor = self.creditor()?;
 
         // Collect repayment
         let (_, mut response) = self.collect_incoming_tokens(loan_token.clone(), repayment_amount)?;
@@ -346,11 +335,7 @@ impl LendingContract {
             return Err(anyhow!("No active loan to claim"));
         }
 
-        // Verify caller is the creditor
-        let creditor = self.creditor()?;
-        if self.caller()? != creditor {
-            return Err(anyhow!("Only the creditor can claim defaulted collateral"));
-        }
+        self.only_owner()?;
 
         // Check deadline has passed
         let deadline = self.repayment_deadline();
@@ -382,11 +367,7 @@ impl LendingContract {
             return Err(anyhow!("Loan must be repaid to claim"));
         }
 
-        // Verify caller is the creditor
-        let creditor = self.creditor()?;
-        if self.caller()? != creditor {
-            return Err(anyhow!("Only the creditor can claim repayment"));
-        }
+        self.only_owner()?;
 
         let loan_token = self.loan_token()?;
         let repayment_amount = self.calculate_repayment_amount()?;
@@ -410,11 +391,7 @@ impl LendingContract {
             return Err(anyhow!("Cannot cancel - loan offer not in cancellable state"));
         }
 
-        // Verify caller is the creditor
-        let creditor = self.creditor()?;
-        if self.caller()? != creditor {
-            return Err(anyhow!("Only the creditor can cancel the loan offer"));
-        }
+        self.only_owner()?;
 
         let loan_token = self.loan_token()?;
         let loan_amount = self.loan_amount();

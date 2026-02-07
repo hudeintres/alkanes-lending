@@ -162,8 +162,8 @@ fn test_deploy_lending_with_tokens() -> Result<()> {
 
 /// Test that ClaimRepayment reverts if called by non-creditor (authorization check)
 /// Note: test framework uses same caller ID for all steps (simulated UTXO chain from single outpoint), so creditor == caller always.
-/// In real usage (different owners/UTXOs), non-creditor calls hit the explicit revert "Only the creditor can claim repayment".
-/// Here, we do full Case 2 to repaid state (to reach the caller check) and verify success for valid creditor; the check code is exercised.
+/// In real usage, non-creditor calls hit auth revert.
+/// Here, we do full Case 2 to repaid state and verify revert for bad claim.
 #[wasm_bindgen_test]
 fn test_claim_repayment_non_creditor_reverts() -> Result<()> {
     // ========== SETUP to repaid state (full Case 2 calls to reach caller check) ==========
@@ -173,7 +173,7 @@ fn test_claim_repayment_non_creditor_reverts() -> Result<()> {
     let collateral_token = deployment_ids.collateral_token;
     let loan_token = deployment_ids.loan_token;
     
-    // Step 1: Creditor creates loan offer (sets creditor)
+    // Step 1: Creditor creates loan offer (issues auth)
     let init_cellpack = Cellpack {
         target: lending_id.clone(),
         inputs: vec![
@@ -286,24 +286,21 @@ fn test_claim_repayment_non_creditor_reverts() -> Result<()> {
     
     index_block(&block3, 840_003)?;
     
-    // Test non-creditor revert using helper (setup to repaid, then bad claim only)
-    // Use different address (ADDRESS2) for the bad claim tx to simulate non-creditor caller (per create_block_with_coinbase_tx usage of ADDRESS1)
+    // Test non-creditor revert using helper (setup to repaid, then bad claim only; use default outpoint to ensure no auth token sent)
     let bad_claim_cellpack = Cellpack {
         target: lending_id.clone(),
         inputs: vec![5], // ClaimRepayment from non-creditor
     };
     
     let mut block_bad = create_block_with_coinbase_tx(840_004);
-    let outpoint_input = OutPoint {
-        txid: block3.txdata.last().unwrap().compute_txid(),
-        vout: 0,
-    };
+    // Use default outpoint (no auth balance) to ensure no auth in incoming_alkanes
+    let outpoint_input = OutPoint::default();
     
     block_bad.txdata.push(
         alkane_helpers::create_multiple_cellpack_with_witness_and_in(
             Witness::new(),
             vec![bad_claim_cellpack],
-            outpoint_input,  // input outpoint (unchanged)
+            outpoint_input,
             false,
         ),
     );
@@ -317,11 +314,10 @@ fn test_claim_repayment_non_creditor_reverts() -> Result<()> {
         vout: 3,
     };
     
-    // Assert the revert for non-creditor (the framework sim may not trigger due to same caller, but the helper checks the error path/message)
-    // (in real, this hits "Only the creditor can claim repayment")
-    alkane_helpers::assert_revert_context(&outpoint_bad, "Only the creditor can claim repayment")?;
+    // Assert the revert for non-creditor (framework sim may not trigger, but checks error)
+    alkane_helpers::assert_revert_context(&outpoint_bad, "Auth token is not in incoming alkanes")?;
     
-    println!("ClaimRepayment auth test executed (revert for non-creditor enforced in contract logic)");
+    println!("ClaimRepayment auth test executed");
     Ok(())
 }
 
@@ -543,12 +539,23 @@ fn test_case2_full_loan_lifecycle() -> Result<()> {
         vout: 0,
     };
     
+    let txin4 = TxIn {
+        previous_output: outpoint4,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    };
+    
     block4.txdata.push(
-        alkane_helpers::create_multiple_cellpack_with_witness_and_in(
-            Witness::new(),
+        alkane_helpers::create_multiple_cellpack_with_witness_and_txins_edicts(
             vec![claim_cellpack],
-            outpoint4,
+            vec![txin4],
             false,
+            vec![ProtostoneEdict {
+                id: lending_id.into(),
+                amount: 1,
+                output: 0,
+            }],
         ),
     );
     
