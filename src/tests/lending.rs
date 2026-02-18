@@ -637,3 +637,218 @@ fn test_case2_loan_default_claim_collateral() -> Result<()> {
     println!("Loan default test passed");
     Ok(())
 }
+
+// ============================================================================
+// Loan Offer Cancellation Tests
+// ============================================================================
+
+/// Test successful cancellation of a loan offer by the creditor.
+///
+/// Flow:
+/// 1. Deploy lending contract + tokens
+/// 2. Creditor creates loan offer (InitWithLoanOffer opcode 0) — deposits loan tokens, receives auth token
+/// 3. Creditor cancels loan offer (CancelLoanOffer opcode 4) — sends auth token back, gets loan tokens refunded
+/// 4. Verify loan tokens were fully refunded to creditor
+#[wasm_bindgen_test]
+fn test_cancel_loan_offer_success() -> Result<()> {
+    let (test_block, deployment_ids) = deploy_lending_with_tokens()?;
+
+    let lending_id = deployment_ids.lending_contract;
+    let collateral_token = deployment_ids.collateral_token;
+    let loan_token = deployment_ids.loan_token;
+
+    // ========== STEP 1: Creditor creates loan offer ==========
+    println!("\n=== STEP 1: InitWithLoanOffer ===");
+
+    let init_cellpack = Cellpack {
+        target: lending_id.clone(),
+        inputs: vec![
+            0,                          // opcode: InitWithLoanOffer
+            collateral_token.block,
+            collateral_token.tx,
+            COLLATERAL_AMOUNT,
+            loan_token.block,
+            loan_token.tx,
+            LOAN_AMOUNT,
+            DURATION_BLOCKS,
+            APR_500_BPS,
+        ],
+    };
+
+    let mut block1 = create_block_with_coinbase_tx(840_001);
+    let outpoint1 = OutPoint {
+        txid: test_block.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let txin1 = TxIn {
+        previous_output: outpoint1,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    };
+
+    block1.txdata.push(
+        alkane_helpers::create_multiple_cellpack_with_witness_and_txins_edicts(
+            vec![init_cellpack],
+            vec![txin1],
+            false,
+            vec![ProtostoneEdict {
+                id: loan_token.into(),
+                amount: LOAN_AMOUNT,
+                output: 0,
+            }],
+        ),
+    );
+
+    index_block(&block1, 840_001)?;
+
+    // Verify loan tokens were deposited (creditor's balance should decrease by LOAN_AMOUNT)
+    let sheet1 = get_last_outpoint_sheet(&block1)?;
+    let loan_balance_after_init = sheet1.get(&loan_token.into());
+    println!("Loan token balance after init: {} (deposited {})", loan_balance_after_init, LOAN_AMOUNT);
+    assert_eq!(
+        loan_balance_after_init,
+        INIT_TOKEN_SUPPLY - LOAN_AMOUNT,
+        "Creditor should have deposited loan tokens into the contract"
+    );
+
+    // Verify creditor received auth token (lending contract's self-token)
+    let auth_balance_after_init = sheet1.get(&lending_id.into());
+    println!("Auth token balance after init: {}", auth_balance_after_init);
+    assert_eq!(
+        auth_balance_after_init, 1,
+        "Creditor should have received 1 auth token"
+    );
+
+    // ========== STEP 2: Creditor cancels loan offer ==========
+    println!("\n=== STEP 2: CancelLoanOffer ===");
+
+    let cancel_cellpack = Cellpack {
+        target: lending_id.clone(),
+        inputs: vec![4], // opcode: CancelLoanOffer
+    };
+
+    let mut block2 = create_block_with_coinbase_tx(840_002);
+    let outpoint2 = OutPoint {
+        txid: block1.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let txin2 = TxIn {
+        previous_output: outpoint2,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    };
+
+    // Send auth token back to the contract to prove ownership (only_owner check)
+    block2.txdata.push(
+        alkane_helpers::create_multiple_cellpack_with_witness_and_txins_edicts(
+            vec![cancel_cellpack],
+            vec![txin2],
+            false,
+            vec![ProtostoneEdict {
+                id: lending_id.into(),
+                amount: 1,
+                output: 0,
+            }],
+        ),
+    );
+
+    index_block(&block2, 840_002)?;
+
+    // ========== STEP 3: Verify loan tokens were refunded ==========
+    println!("\n=== STEP 3: Verify refund ===");
+
+    let sheet2 = get_last_outpoint_sheet(&block2)?;
+    let loan_balance_after_cancel = sheet2.get(&loan_token.into());
+    let collateral_balance_after_cancel = sheet2.get(&collateral_token.into());
+
+    println!("Loan token balance after cancel: {} (expected full supply {})", loan_balance_after_cancel, INIT_TOKEN_SUPPLY);
+    println!("Collateral token balance after cancel: {}", collateral_balance_after_cancel);
+
+    // Creditor should get all loan tokens back (original supply restored)
+    assert_eq!(
+        loan_balance_after_cancel,
+        INIT_TOKEN_SUPPLY,
+        "Creditor should get all loan tokens refunded after cancellation"
+    );
+
+    // Collateral tokens should be unchanged (never deposited)
+    assert_eq!(
+        collateral_balance_after_cancel,
+        INIT_TOKEN_SUPPLY,
+        "Collateral tokens should be unchanged (never deposited)"
+    );
+
+    println!("\n=== LOAN OFFER CANCELLATION SUCCESSFUL ===");
+    Ok(())
+}
+
+/// Test that cancelling a loan offer fails when the debitor has already taken the loan.
+///
+/// Flow:
+/// 1. Deploy lending contract + tokens
+/// 2. Creditor creates loan offer (InitWithLoanOffer opcode 0)
+/// 3. Debitor takes loan with collateral (TakeLoanWithCollateral opcode 1) — state becomes LOAN_ACTIVE
+/// 4. Creditor attempts to cancel (CancelLoanOffer opcode 4) — should revert
+/// 5. Verify revert message: "Cannot cancel - loan offer not in cancellable state"
+#[wasm_bindgen_test]
+fn test_cancel_loan_offer_fails_after_debitor_takes() -> Result<()> {
+    // Use the common helper that deploys + init + take to reach STATE_LOAN_ACTIVE
+    let (block_after_take, deployment_ids) = setup_case2_to_active_state()?;
+
+    let lending_id = deployment_ids.lending_contract;
+
+    println!("\n=== Attempting CancelLoanOffer after debitor has taken the loan ===");
+
+    // ========== Creditor tries to cancel (should fail — loan is active) ==========
+    let cancel_cellpack = Cellpack {
+        target: lending_id.clone(),
+        inputs: vec![4], // opcode: CancelLoanOffer
+    };
+
+    let mut block_cancel = create_block_with_coinbase_tx(840_003);
+    let outpoint_cancel = OutPoint {
+        txid: block_after_take.txdata.last().unwrap().compute_txid(),
+        vout: 0,
+    };
+
+    let txin_cancel = TxIn {
+        previous_output: outpoint_cancel,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    };
+
+    // Send auth token to satisfy only_owner (but state check should fail first)
+    block_cancel.txdata.push(
+        alkane_helpers::create_multiple_cellpack_with_witness_and_txins_edicts(
+            vec![cancel_cellpack],
+            vec![txin_cancel],
+            false,
+            vec![ProtostoneEdict {
+                id: lending_id.into(),
+                amount: 1,
+                output: 0,
+            }],
+        ),
+    );
+
+    index_block(&block_cancel, 840_003)?;
+
+    // Assert the transaction reverted with the expected error message
+    let outpoint_revert = OutPoint {
+        txid: block_cancel.txdata.last().unwrap().compute_txid(),
+        vout: 3,
+    };
+
+    alkane_helpers::assert_revert_context(
+        &outpoint_revert,
+        "Cannot cancel - loan offer not in cancellable state",
+    )?;
+
+    println!("\n=== CANCEL CORRECTLY REJECTED — LOAN ALREADY TAKEN ===");
+    Ok(())
+}

@@ -263,7 +263,7 @@ impl LendingContract {
         }
 
         let collateral_token = self.collateral_token()?;
-        let collateral_amount = self.collateral_amount();
+        let collateral_amount: u128 = self.collateral_amount();
         let loan_token = self.loan_token()?;
         let loan_amount = self.loan_amount();
         let duration = self.duration_blocks();
