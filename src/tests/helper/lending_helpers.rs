@@ -13,7 +13,6 @@ use alkanes::indexer::index_block;
 use alkanes::precompiled::{alkanes_std_auth_token_build, alkanes_std_owned_token_build};
 use alkanes::tests::helpers::{self as alkane_helpers, BinaryAndCellpack};
 use alkanes_support::constants::AUTH_TOKEN_FACTORY_ID;
-use alkanes_support::trace::TraceResponse;
 use alkanes_support::{cellpack::Cellpack, id::AlkaneId};
 use anyhow::Result;
 use bitcoin::blockdata::transaction::OutPoint;
@@ -406,6 +405,37 @@ pub fn cancel_loan_offer(
 }
 
 // ============================================================================
+// View function helpers
+// ============================================================================
+
+/// Call a view function (no tokens needed) and return the response data bytes.
+///
+/// Executes the given `opcode` against `lending_id` at `height` using a default
+/// outpoint (no balance). Extracts the response data from the trace.
+pub fn call_view(
+    height: u32,
+    lending_id: &AlkaneId,
+    opcode: u128,
+) -> Result<Vec<u8>> {
+    let cellpack = Cellpack {
+        target: lending_id.clone(),
+        inputs: vec![opcode],
+    };
+    let block = execute_cellpack_no_balance(height, cellpack)?;
+    let outpoint = protostone_outpoint(&block, PROTOSTONE_VOUT);
+    alkane_helpers::assert_return_context(&outpoint, |trace_response| {
+        Ok(trace_response.inner.data.clone())
+    })
+}
+
+/// Decode a little-endian u128 from `data` at byte offset `offset`.
+pub fn read_u128_le(data: &[u8], offset: usize) -> u128 {
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&data[offset..offset + 16]);
+    u128::from_le_bytes(bytes)
+}
+
+// ============================================================================
 // Composite setup helpers
 // ============================================================================
 
@@ -433,127 +463,4 @@ pub fn setup_to_repaid_state() -> Result<(Block, LendingDeploymentIds)> {
     let terms = LoanTerms::default_from(&ids);
     let repay_block = repay_loan(&take_block, DEPLOY_HEIGHT + 3, &ids.lending_contract, &terms)?;
     Ok((repay_block, ids))
-}
-
-// ============================================================================
-// View-call helpers
-// ============================================================================
-
-/// Call a view function (opcode 90–100) on the lending contract.
-///
-/// View calls don't need token transfers, so we use a default outpoint.
-/// Returns the indexed block (the trace can be inspected for response data).
-pub fn call_view(
-    height: u32,
-    lending_id: &AlkaneId,
-    opcode: u128,
-) -> Result<Block> {
-    let cellpack = Cellpack {
-        target: lending_id.clone(),
-        inputs: vec![opcode],
-    };
-    execute_cellpack_no_balance(height, cellpack)
-}
-
-/// Extract the response data bytes from a successful (non-reverting) call.
-///
-/// Uses `assert_return_context` to verify the call succeeded and returns
-/// the raw `data` bytes from the `ExtendedCallResponse`.
-pub fn get_response_data(block: &Block) -> Result<Vec<u8>> {
-    let outpoint = protostone_outpoint(block, PROTOSTONE_VOUT);
-    let data = alkane_helpers::assert_return_context(&outpoint, |trace_response: TraceResponse| {
-        Ok(trace_response.inner.data.clone())
-    })?;
-    Ok(data)
-}
-
-/// Call a view function and return its response data bytes.
-pub fn call_view_and_get_data(
-    height: u32,
-    lending_id: &AlkaneId,
-    opcode: u128,
-) -> Result<Vec<u8>> {
-    let block = call_view(height, lending_id, opcode)?;
-    get_response_data(&block)
-}
-
-/// Parse a single `u128` value from little-endian response data.
-pub fn parse_u128(data: &[u8]) -> u128 {
-    assert!(data.len() >= 16, "Expected at least 16 bytes, got {}", data.len());
-    u128::from_le_bytes(data[..16].try_into().unwrap())
-}
-
-/// Decoded loan details returned by opcode 90.
-#[derive(Debug)]
-pub struct LoanDetails {
-    pub state: u128,
-    pub collateral_token: Option<AlkaneId>,
-    pub collateral_amount: Option<u128>,
-    pub loan_token: Option<AlkaneId>,
-    pub loan_amount: Option<u128>,
-    pub duration_blocks: Option<u128>,
-    pub apr: Option<u128>,
-    pub repayment_deadline: Option<u128>,
-    pub loan_start_block: Option<u128>,
-}
-
-/// Parse the binary blob returned by `GetLoanDetails` (opcode 90).
-///
-/// Layout (all little-endian u128):
-/// - state (always present)
-/// - If state != 0 (UNINITIALIZED):
-///   - collateral_token.block, collateral_token.tx
-///   - collateral_amount
-///   - loan_token.block, loan_token.tx
-///   - loan_amount
-///   - duration_blocks
-///   - apr
-/// - If state == 2 (LOAN_ACTIVE):
-///   - repayment_deadline
-///   - loan_start_block
-pub fn parse_loan_details(data: &[u8]) -> LoanDetails {
-    let state = parse_u128(&data[0..16]);
-    if state == 0 {
-        return LoanDetails {
-            state,
-            collateral_token: None,
-            collateral_amount: None,
-            loan_token: None,
-            loan_amount: None,
-            duration_blocks: None,
-            apr: None,
-            repayment_deadline: None,
-            loan_start_block: None,
-        };
-    }
-
-    let mut offset = 16;
-    let ct_block = parse_u128(&data[offset..offset + 16]); offset += 16;
-    let ct_tx = parse_u128(&data[offset..offset + 16]); offset += 16;
-    let collateral_amount = parse_u128(&data[offset..offset + 16]); offset += 16;
-    let lt_block = parse_u128(&data[offset..offset + 16]); offset += 16;
-    let lt_tx = parse_u128(&data[offset..offset + 16]); offset += 16;
-    let loan_amount = parse_u128(&data[offset..offset + 16]); offset += 16;
-    let duration_blocks = parse_u128(&data[offset..offset + 16]); offset += 16;
-    let apr = parse_u128(&data[offset..offset + 16]); offset += 16;
-
-    let (repayment_deadline, loan_start_block) = if state == 2 && data.len() >= offset + 32 {
-        let deadline = parse_u128(&data[offset..offset + 16]); offset += 16;
-        let start = parse_u128(&data[offset..offset + 16]);
-        (Some(deadline), Some(start))
-    } else {
-        (None, None)
-    };
-
-    LoanDetails {
-        state,
-        collateral_token: Some(AlkaneId { block: ct_block, tx: ct_tx }),
-        collateral_amount: Some(collateral_amount),
-        loan_token: Some(AlkaneId { block: lt_block, tx: lt_tx }),
-        loan_amount: Some(loan_amount),
-        duration_blocks: Some(duration_blocks),
-        apr: Some(apr),
-        repayment_deadline,
-        loan_start_block,
-    }
 }

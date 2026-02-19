@@ -10,6 +10,7 @@ use crate::tests::helper::lending_helpers::{
     self as h, LoanTerms, COLLATERAL_AMOUNT, DEPLOY_HEIGHT, INIT_TOKEN_SUPPLY, LOAN_AMOUNT,
     APR_500_BPS, DURATION_BLOCKS,
 };
+
 use alkanes::tests::helpers::get_last_outpoint_sheet;
 use alkanes_support::cellpack::Cellpack;
 use anyhow::Result;
@@ -17,6 +18,13 @@ use anyhow::Result;
 use metashrew_core::{println, stdio::{stdout, Write}};
 use protorune_support::balance_sheet::BalanceSheetOperations;
 use wasm_bindgen_test::wasm_bindgen_test;
+
+/// Contract state constants (mirror contract's internal values)
+const STATE_UNINITIALIZED: u128 = 0;
+const STATE_WAITING_FOR_DEBITOR_TAKE: u128 = 1;
+const STATE_LOAN_ACTIVE: u128 = 2;
+const STATE_LOAN_REPAID: u128 = 3;
+const STATE_LOAN_DEFAULTED: u128 = 4;
 
 // ============================================================================
 // Deployment Tests
@@ -280,227 +288,286 @@ fn test_take_insufficient_collateral() -> Result<()> {
 }
 
 // ============================================================================
-// View Function Tests (opcodes 90–100)
+// View Function Tests (Opcodes 90–100)
 // ============================================================================
 
-/// Test GetLoanDetails (opcode 90) in UNINITIALIZED state.
-/// Should return only the state value (0).
+/// Test GetState (opcode 92) returns correct state at every lifecycle stage:
+/// UNINITIALIZED → WAITING → ACTIVE → REPAID
 #[wasm_bindgen_test]
-fn test_view_get_loan_details_uninitialized() -> Result<()> {
+fn test_get_state_all_lifecycle_stages() -> Result<()> {
+    // Uninitialized
     let (deploy_block, ids) = h::deploy_lending_with_tokens()?;
-    let _ = &deploy_block; // ensure indexed
+    let lending_id = &ids.lending_contract;
 
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 1, &ids.lending_contract, 90)?;
-    let details = h::parse_loan_details(&data);
+    let data = h::call_view(DEPLOY_HEIGHT + 1, lending_id, 92)?;
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_UNINITIALIZED, "State should be UNINITIALIZED after deploy");
 
-    assert_eq!(details.state, 0, "State should be UNINITIALIZED (0)");
-    assert!(details.collateral_token.is_none(), "No loan params in uninitialized state");
+    // Waiting
+    let terms = LoanTerms::default_from(&ids);
+    let init_block = h::init_loan_offer(&deploy_block, DEPLOY_HEIGHT + 2, lending_id, &terms)?;
 
-    println!("GetLoanDetails (uninitialized) test passed");
+    let data = h::call_view(DEPLOY_HEIGHT + 3, lending_id, 92)?;
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_WAITING_FOR_DEBITOR_TAKE, "State should be WAITING after init");
+
+    // Active
+    let take_block = h::take_loan(&init_block, DEPLOY_HEIGHT + 4, lending_id, &terms)?;
+
+    let data = h::call_view(DEPLOY_HEIGHT + 5, lending_id, 92)?;
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_LOAN_ACTIVE, "State should be ACTIVE after take");
+
+    // Repaid
+    let _repay_block = h::repay_loan(&take_block, DEPLOY_HEIGHT + 6, lending_id, &terms)?;
+
+    let data = h::call_view(DEPLOY_HEIGHT + 7, lending_id, 92)?;
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_LOAN_REPAID, "State should be REPAID after repay");
+
+    println!("GetState lifecycle test passed");
     Ok(())
 }
 
-/// Test GetLoanDetails (opcode 90) in WAITING_FOR_DEBITOR_TAKE state.
-/// Should return state=1 plus all loan parameters (no deadline/start_block).
+/// Test GetState (opcode 92) returns DEFAULTED after creditor claims collateral.
 #[wasm_bindgen_test]
-fn test_view_get_loan_details_waiting() -> Result<()> {
-    let (init_block, ids) = h::setup_to_waiting_state()?;
-    let _ = &init_block;
-
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 2, &ids.lending_contract, 90)?;
-    let details = h::parse_loan_details(&data);
-
-    assert_eq!(details.state, 1, "State should be WAITING_FOR_DEBITOR_TAKE (1)");
-    assert_eq!(
-        details.collateral_token.unwrap(),
-        ids.collateral_token,
-        "Collateral token should match"
-    );
-    assert_eq!(details.collateral_amount.unwrap(), COLLATERAL_AMOUNT);
-    assert_eq!(
-        details.loan_token.unwrap(),
-        ids.loan_token,
-        "Loan token should match"
-    );
-    assert_eq!(details.loan_amount.unwrap(), LOAN_AMOUNT);
-    assert_eq!(details.duration_blocks.unwrap(), DURATION_BLOCKS);
-    assert_eq!(details.apr.unwrap(), APR_500_BPS);
-    assert!(details.repayment_deadline.is_none(), "No deadline in waiting state");
-    assert!(details.loan_start_block.is_none(), "No start block in waiting state");
-
-    println!("GetLoanDetails (waiting) test passed");
-    Ok(())
-}
-
-/// Test GetLoanDetails (opcode 90) in LOAN_ACTIVE state.
-/// Should return state=2 plus all loan parameters AND deadline/start_block.
-#[wasm_bindgen_test]
-fn test_view_get_loan_details_active() -> Result<()> {
+fn test_get_state_defaulted() -> Result<()> {
     let (take_block, ids) = h::setup_to_active_state()?;
-    let _ = &take_block;
+    let lending_id = &ids.lending_contract;
+    let default_height = 845_260u32;
 
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 3, &ids.lending_contract, 90)?;
-    let details = h::parse_loan_details(&data);
+    // Creditor claims defaulted collateral
+    let _claim_block = h::claim_defaulted_collateral(&take_block, default_height, lending_id)?;
 
-    assert_eq!(details.state, 2, "State should be LOAN_ACTIVE (2)");
-    assert_eq!(details.collateral_token.unwrap(), ids.collateral_token);
-    assert_eq!(details.collateral_amount.unwrap(), COLLATERAL_AMOUNT);
-    assert_eq!(details.loan_token.unwrap(), ids.loan_token);
-    assert_eq!(details.loan_amount.unwrap(), LOAN_AMOUNT);
-    assert_eq!(details.duration_blocks.unwrap(), DURATION_BLOCKS);
-    assert_eq!(details.apr.unwrap(), APR_500_BPS);
+    let data = h::call_view(default_height + 1, lending_id, 92)?;
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_LOAN_DEFAULTED, "State should be DEFAULTED after collateral claim");
 
-    // Take happened at DEPLOY_HEIGHT + 2
-    let expected_start = (DEPLOY_HEIGHT + 2) as u128;
-    let expected_deadline = expected_start + DURATION_BLOCKS;
-    assert_eq!(
-        details.repayment_deadline.unwrap(), expected_deadline,
-        "Deadline should be start + duration"
-    );
-    assert_eq!(
-        details.loan_start_block.unwrap(), expected_start,
-        "Start block should be the take block height"
-    );
-
-    println!("GetLoanDetails (active) test passed");
+    println!("GetState defaulted test passed");
     Ok(())
 }
 
-/// Test GetRepaymentAmount (opcode 91) across different states.
-/// - UNINITIALIZED / WAITING: should return 0
-/// - ACTIVE: should return principal + interest
-/// - REPAID: should return 0
+/// Test GetLoanDetails (opcode 90) when contract is uninitialized.
+/// Should return only the state (0) with no additional data.
 #[wasm_bindgen_test]
-fn test_view_get_repayment_amount() -> Result<()> {
-    // --- Uninitialized: should return 0 ---
-    let (deploy_block, ids) = h::deploy_lending_with_tokens()?;
-    let _ = &deploy_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 1, &ids.lending_contract, 91)?;
-    let amount = h::parse_u128(&data);
+fn test_get_loan_details_uninitialized() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let lending_id = &ids.lending_contract;
+
+    let data = h::call_view(DEPLOY_HEIGHT + 1, lending_id, 90)?;
+
+    // When uninitialized, data is just the state (16 bytes)
+    assert_eq!(data.len(), 16, "Uninitialized loan details should be 16 bytes (state only)");
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_UNINITIALIZED, "State should be UNINITIALIZED");
+
+    println!("GetLoanDetails uninitialized test passed");
+    Ok(())
+}
+
+/// Test GetLoanDetails (opcode 90) in WAITING state.
+/// Should return state + collateral_token (block, tx) + collateral_amount +
+/// loan_token (block, tx) + loan_amount + duration + APR = 9 × u128 = 144 bytes.
+#[wasm_bindgen_test]
+fn test_get_loan_details_waiting() -> Result<()> {
+    let (_init_block, ids) = h::setup_to_waiting_state()?;
+    let lending_id = &ids.lending_contract;
+
+    let data = h::call_view(DEPLOY_HEIGHT + 2, lending_id, 90)?;
+
+    // state + collateral_token.block + collateral_token.tx + collateral_amount
+    // + loan_token.block + loan_token.tx + loan_amount + duration + apr
+    // = 9 × 16 = 144 bytes
+    assert_eq!(data.len(), 144, "Waiting loan details should be 144 bytes");
+
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_WAITING_FOR_DEBITOR_TAKE);
+
+    let coll_block = h::read_u128_le(&data, 16);
+    let coll_tx = h::read_u128_le(&data, 32);
+    assert_eq!(coll_block, ids.collateral_token.block);
+    assert_eq!(coll_tx, ids.collateral_token.tx);
+
+    let coll_amount = h::read_u128_le(&data, 48);
+    assert_eq!(coll_amount, COLLATERAL_AMOUNT);
+
+    let loan_block = h::read_u128_le(&data, 64);
+    let loan_tx = h::read_u128_le(&data, 80);
+    assert_eq!(loan_block, ids.loan_token.block);
+    assert_eq!(loan_tx, ids.loan_token.tx);
+
+    let loan_amount = h::read_u128_le(&data, 96);
+    assert_eq!(loan_amount, LOAN_AMOUNT);
+
+    let duration = h::read_u128_le(&data, 112);
+    assert_eq!(duration, DURATION_BLOCKS);
+
+    let apr = h::read_u128_le(&data, 128);
+    assert_eq!(apr, APR_500_BPS);
+
+    println!("GetLoanDetails waiting test passed");
+    Ok(())
+}
+
+/// Test GetLoanDetails (opcode 90) in ACTIVE state.
+/// Should include deadline and start_block (2 extra u128 fields = 176 bytes total).
+#[wasm_bindgen_test]
+fn test_get_loan_details_active() -> Result<()> {
+    let (_take_block, ids) = h::setup_to_active_state()?;
+    let lending_id = &ids.lending_contract;
+
+    let data = h::call_view(DEPLOY_HEIGHT + 3, lending_id, 90)?;
+
+    // 9 base fields + deadline + start_block = 11 × 16 = 176 bytes
+    assert_eq!(data.len(), 176, "Active loan details should be 176 bytes");
+
+    let state = h::read_u128_le(&data, 0);
+    assert_eq!(state, STATE_LOAN_ACTIVE);
+
+    // Deadline: take happened at DEPLOY_HEIGHT + 2, deadline = (DEPLOY_HEIGHT+2) + DURATION_BLOCKS
+    let deadline = h::read_u128_le(&data, 144);
+    let expected_deadline = (DEPLOY_HEIGHT as u128 + 2) + DURATION_BLOCKS;
+    assert_eq!(deadline, expected_deadline, "Deadline should be take_height + duration");
+
+    // Start block: take happened at DEPLOY_HEIGHT + 2
+    let start_block = h::read_u128_le(&data, 160);
+    assert_eq!(start_block, DEPLOY_HEIGHT as u128 + 2, "Start block should be take height");
+
+    println!("GetLoanDetails active test passed");
+    Ok(())
+}
+
+/// Test GetRepaymentAmount (opcode 91) in ACTIVE state.
+/// Should return the calculated repayment amount (principal + interest).
+#[wasm_bindgen_test]
+fn test_get_repayment_amount_active() -> Result<()> {
+    let (_take_block, ids) = h::setup_to_active_state()?;
+    let lending_id = &ids.lending_contract;
+
+    let data = h::call_view(DEPLOY_HEIGHT + 3, lending_id, 91)?;
+
+    assert_eq!(data.len(), 16, "Repayment amount should be 16 bytes (u128)");
+    let returned_amount = h::read_u128_le(&data, 0);
+    let expected_amount = calculate_repayment_amount(LOAN_AMOUNT, APR_500_BPS, DURATION_BLOCKS);
+
+    assert_eq!(
+        returned_amount, expected_amount,
+        "Repayment amount should match calculated value"
+    );
+    println!("GetRepaymentAmount returned: {} (expected: {})", returned_amount, expected_amount);
+    Ok(())
+}
+
+/// Test GetRepaymentAmount (opcode 91) when no active loan.
+/// Should return 0.
+#[wasm_bindgen_test]
+fn test_get_repayment_amount_no_active_loan() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let lending_id = &ids.lending_contract;
+
+    // Uninitialized state
+    let data = h::call_view(DEPLOY_HEIGHT + 1, lending_id, 91)?;
+    let amount = h::read_u128_le(&data, 0);
     assert_eq!(amount, 0, "Repayment amount should be 0 when uninitialized");
 
-    // --- Waiting: should return 0 ---
-    let (init_block, ids) = h::setup_to_waiting_state()?;
-    let _ = &init_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 2, &ids.lending_contract, 91)?;
-    let amount = h::parse_u128(&data);
-    assert_eq!(amount, 0, "Repayment amount should be 0 when waiting");
-
-    // --- Active: should return principal + interest ---
-    let (take_block, ids) = h::setup_to_active_state()?;
-    let _ = &take_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 3, &ids.lending_contract, 91)?;
-    let amount = h::parse_u128(&data);
-    let expected = calculate_repayment_amount(LOAN_AMOUNT, APR_500_BPS, DURATION_BLOCKS);
-    assert_eq!(
-        amount, expected,
-        "Repayment amount should be principal + interest"
-    );
-
-    // --- Repaid: should return 0 ---
-    let (repay_block, ids) = h::setup_to_repaid_state()?;
-    let _ = &repay_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 4, &ids.lending_contract, 91)?;
-    let amount = h::parse_u128(&data);
-    assert_eq!(amount, 0, "Repayment amount should be 0 after repayment");
-
-    println!("GetRepaymentAmount test passed");
+    println!("GetRepaymentAmount no-active-loan test passed");
     Ok(())
 }
 
-/// Test GetState (opcode 92) across the full lifecycle.
-/// Verifies state transitions: 0 → 1 → 2 → 3
+/// Test GetRepaymentAmount (opcode 91) in WAITING state (not yet active).
+/// Should return 0.
 #[wasm_bindgen_test]
-fn test_view_get_state() -> Result<()> {
-    // State 0: UNINITIALIZED
-    let (deploy_block, ids) = h::deploy_lending_with_tokens()?;
-    let _ = &deploy_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 1, &ids.lending_contract, 92)?;
-    assert_eq!(h::parse_u128(&data), 0, "Should be STATE_UNINITIALIZED (0)");
+fn test_get_repayment_amount_waiting() -> Result<()> {
+    let (_init_block, ids) = h::setup_to_waiting_state()?;
+    let lending_id = &ids.lending_contract;
 
-    // State 1: WAITING_FOR_DEBITOR_TAKE
-    let (init_block, ids) = h::setup_to_waiting_state()?;
-    let _ = &init_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 2, &ids.lending_contract, 92)?;
-    assert_eq!(h::parse_u128(&data), 1, "Should be STATE_WAITING_FOR_DEBITOR_TAKE (1)");
+    let data = h::call_view(DEPLOY_HEIGHT + 2, lending_id, 91)?;
+    let amount = h::read_u128_le(&data, 0);
+    assert_eq!(amount, 0, "Repayment amount should be 0 when waiting (not active)");
 
-    // State 2: LOAN_ACTIVE
-    let (take_block, ids) = h::setup_to_active_state()?;
-    let _ = &take_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 3, &ids.lending_contract, 92)?;
-    assert_eq!(h::parse_u128(&data), 2, "Should be STATE_LOAN_ACTIVE (2)");
-
-    // State 3: LOAN_REPAID
-    let (repay_block, ids) = h::setup_to_repaid_state()?;
-    let _ = &repay_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 4, &ids.lending_contract, 92)?;
-    assert_eq!(h::parse_u128(&data), 3, "Should be STATE_LOAN_REPAID (3)");
-
-    println!("GetState test passed");
+    println!("GetRepaymentAmount waiting test passed");
     Ok(())
 }
 
-/// Test GetTimeRemaining (opcode 93).
-/// - Non-active states should return 0
-/// - Active state should return deadline - current_block
-/// - Past deadline should return 0
+/// Test GetTimeRemaining (opcode 93) during active loan.
+/// Should return the number of blocks until the deadline.
 #[wasm_bindgen_test]
-fn test_view_get_time_remaining() -> Result<()> {
-    // --- Uninitialized: should return 0 ---
-    let (deploy_block, ids) = h::deploy_lending_with_tokens()?;
-    let _ = &deploy_block;
-    let data = h::call_view_and_get_data(DEPLOY_HEIGHT + 1, &ids.lending_contract, 93)?;
-    assert_eq!(h::parse_u128(&data), 0, "Time remaining should be 0 when uninitialized");
+fn test_get_time_remaining_active() -> Result<()> {
+    let (_take_block, ids) = h::setup_to_active_state()?;
+    let lending_id = &ids.lending_contract;
 
-    // --- Active: should return remaining blocks ---
-    let (take_block, ids) = h::setup_to_active_state()?;
-    let _ = &take_block;
-    // View call at DEPLOY_HEIGHT + 3; take was at DEPLOY_HEIGHT + 2
-    // deadline = (DEPLOY_HEIGHT + 2) + DURATION_BLOCKS
-    // remaining = deadline - (DEPLOY_HEIGHT + 3)
+    // Take happened at DEPLOY_HEIGHT + 2, deadline = (DEPLOY_HEIGHT + 2) + DURATION_BLOCKS
+    // Query at DEPLOY_HEIGHT + 3, remaining = deadline - (DEPLOY_HEIGHT + 3)
     let query_height = DEPLOY_HEIGHT + 3;
-    let data = h::call_view_and_get_data(query_height, &ids.lending_contract, 93)?;
-    let remaining = h::parse_u128(&data);
-    let expected_deadline = (DEPLOY_HEIGHT + 2) as u128 + DURATION_BLOCKS;
+    let data = h::call_view(query_height, lending_id, 93)?;
+    let remaining = h::read_u128_le(&data, 0);
+
+    let expected_deadline = (DEPLOY_HEIGHT as u128 + 2) + DURATION_BLOCKS;
     let expected_remaining = expected_deadline - query_height as u128;
+
     assert_eq!(
         remaining, expected_remaining,
         "Time remaining should be deadline - current_block"
     );
+    println!("GetTimeRemaining returned: {} blocks (expected: {})", remaining, expected_remaining);
+    Ok(())
+}
 
-    // --- Active but past deadline: should return 0 ---
-    // Re-setup to active state for a clean test
+/// Test GetTimeRemaining (opcode 93) when deadline has passed.
+/// Should return 0.
+#[wasm_bindgen_test]
+fn test_get_time_remaining_expired() -> Result<()> {
     let (_take_block, ids) = h::setup_to_active_state()?;
-    let past_deadline_height = (DEPLOY_HEIGHT + 2) + DURATION_BLOCKS as u32 + 100;
-    let data = h::call_view_and_get_data(past_deadline_height, &ids.lending_contract, 93)?;
-    assert_eq!(h::parse_u128(&data), 0, "Time remaining should be 0 past deadline");
+    let lending_id = &ids.lending_contract;
 
-    println!("GetTimeRemaining test passed");
+    // Query well past the deadline
+    let expired_height = 850_000u32;
+    let data = h::call_view(expired_height, lending_id, 93)?;
+    let remaining = h::read_u128_le(&data, 0);
+
+    assert_eq!(remaining, 0, "Time remaining should be 0 after deadline");
+
+    println!("GetTimeRemaining expired test passed");
+    Ok(())
+}
+
+/// Test GetTimeRemaining (opcode 93) when no active loan.
+/// Should return 0.
+#[wasm_bindgen_test]
+fn test_get_time_remaining_no_active_loan() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let lending_id = &ids.lending_contract;
+
+    let data = h::call_view(DEPLOY_HEIGHT + 1, lending_id, 93)?;
+    let remaining = h::read_u128_le(&data, 0);
+    assert_eq!(remaining, 0, "Time remaining should be 0 when uninitialized");
+
+    println!("GetTimeRemaining no-active-loan test passed");
     Ok(())
 }
 
 /// Test GetName (opcode 99) and GetSymbol (opcode 100).
-/// The lending contract never calls `set_name_and_symbol`, so both return empty.
+/// The lending contract does not set a name or symbol, so both should return
+/// empty data.
 #[wasm_bindgen_test]
-fn test_view_get_name_and_symbol() -> Result<()> {
-    let (deploy_block, ids) = h::deploy_lending_with_tokens()?;
-    let _ = &deploy_block;
+fn test_get_name_and_symbol() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let lending_id = &ids.lending_contract;
 
-    // GetName (opcode 99)
-    let name_data = h::call_view_and_get_data(DEPLOY_HEIGHT + 1, &ids.lending_contract, 99)?;
-    let name = String::from_utf8(name_data.clone())
-        .unwrap_or_else(|_| format!("<invalid utf8: {} bytes>", name_data.len()));
-    println!("Contract name: '{}'", name);
-    // Name is empty since set_name_and_symbol was never called
-    assert!(name.is_empty() || !name.is_empty(), "Name should be retrievable");
+    let name_data = h::call_view(DEPLOY_HEIGHT + 1, lending_id, 99)?;
+    let symbol_data = h::call_view(DEPLOY_HEIGHT + 2, lending_id, 100)?;
 
-    // GetSymbol (opcode 100)
-    let symbol_data = h::call_view_and_get_data(DEPLOY_HEIGHT + 2, &ids.lending_contract, 100)?;
-    let symbol = String::from_utf8(symbol_data.clone())
-        .unwrap_or_else(|_| format!("<invalid utf8: {} bytes>", symbol_data.len()));
-    println!("Contract symbol: '{}'", symbol);
-    assert!(symbol.is_empty() || !symbol.is_empty(), "Symbol should be retrievable");
+    // Contract never calls set_name_and_symbol, so both are empty
+    let name = String::from_utf8(name_data.clone()).unwrap_or_default();
+    let symbol = String::from_utf8(symbol_data.clone()).unwrap_or_default();
 
-    println!("GetName/GetSymbol test passed");
+    println!("GetName returned: {:?} ({} bytes)", name, name_data.len());
+    println!("GetSymbol returned: {:?} ({} bytes)", symbol, symbol_data.len());
+
+    // Name and symbol are not set in the lending contract, so they should be empty
+    assert!(name_data.is_empty() || name.is_empty(), "Name should be empty (not set by lending contract)");
+    assert!(symbol_data.is_empty() || symbol.is_empty(), "Symbol should be empty (not set by lending contract)");
+
+    println!("GetName and GetSymbol test passed");
     Ok(())
 }
