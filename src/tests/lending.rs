@@ -288,6 +288,87 @@ fn test_take_insufficient_collateral() -> Result<()> {
 }
 
 // ============================================================================
+// InitWithLoanOffer Validation Error Tests
+// ============================================================================
+
+/// Test that InitWithLoanOffer reverts when collateral_amount is zero.
+#[wasm_bindgen_test]
+fn test_init_collateral_amount_zero() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let mut terms = LoanTerms::default_from(&ids);
+    terms.collateral_amount = 0;
+
+    let cellpack = h::build_init_cellpack(&ids.lending_contract, &terms);
+    let block = h::execute_cellpack_no_balance(DEPLOY_HEIGHT + 1, cellpack)?;
+
+    h::assert_revert(&block, "Collateral amount cannot be zero")?;
+    println!("Init collateral_amount=0 correctly rejected");
+    Ok(())
+}
+
+/// Test that InitWithLoanOffer reverts when loan_amount is zero.
+#[wasm_bindgen_test]
+fn test_init_loan_amount_zero() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let mut terms = LoanTerms::default_from(&ids);
+    terms.loan_amount = 0;
+
+    let cellpack = h::build_init_cellpack(&ids.lending_contract, &terms);
+    let block = h::execute_cellpack_no_balance(DEPLOY_HEIGHT + 1, cellpack)?;
+
+    h::assert_revert(&block, "Loan amount cannot be zero")?;
+    println!("Init loan_amount=0 correctly rejected");
+    Ok(())
+}
+
+/// Test that InitWithLoanOffer reverts when duration_blocks is zero.
+#[wasm_bindgen_test]
+fn test_init_duration_zero() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let mut terms = LoanTerms::default_from(&ids);
+    terms.duration_blocks = 0;
+
+    let cellpack = h::build_init_cellpack(&ids.lending_contract, &terms);
+    let block = h::execute_cellpack_no_balance(DEPLOY_HEIGHT + 1, cellpack)?;
+
+    h::assert_revert(&block, "Duration cannot be zero")?;
+    println!("Init duration=0 correctly rejected");
+    Ok(())
+}
+
+/// Test that InitWithLoanOffer reverts when collateral and loan token are the same.
+#[wasm_bindgen_test]
+fn test_init_same_collateral_and_loan_token() -> Result<()> {
+    let (_deploy_block, ids) = h::deploy_lending_with_tokens()?;
+    let mut terms = LoanTerms::default_from(&ids);
+    // Set collateral token equal to loan token
+    terms.collateral_token = terms.loan_token.clone();
+
+    let cellpack = h::build_init_cellpack(&ids.lending_contract, &terms);
+    let block = h::execute_cellpack_no_balance(DEPLOY_HEIGHT + 1, cellpack)?;
+
+    h::assert_revert(&block, "Collateral and loan token cannot be the same")?;
+    println!("Init same-token correctly rejected");
+    Ok(())
+}
+
+/// Test that InitWithLoanOffer reverts when called a second time
+/// (contract already initialized via `observe_initialization`).
+#[wasm_bindgen_test]
+fn test_init_already_initialized() -> Result<()> {
+    let (_init_block, ids) = h::setup_to_waiting_state()?;
+
+    // Attempt a second init — should fail at observe_initialization
+    let terms = LoanTerms::default_from(&ids);
+    let cellpack = h::build_init_cellpack(&ids.lending_contract, &terms);
+    let block = h::execute_cellpack_no_balance(DEPLOY_HEIGHT + 2, cellpack)?;
+
+    h::assert_revert(&block, "already initialized")?;
+    println!("Init already-initialized correctly rejected");
+    Ok(())
+}
+
+// ============================================================================
 // View Function Tests (Opcodes 90–100)
 // ============================================================================
 

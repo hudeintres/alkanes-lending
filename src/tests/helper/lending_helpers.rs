@@ -297,6 +297,27 @@ pub fn init_loan_offer(
     execute_cellpack_with_edicts(prev_block, height, cellpack, edicts)
 }
 
+/// Build an InitWithLoanOffer cellpack (opcode 0) from custom loan terms.
+///
+/// This only constructs the cellpack — it does NOT send tokens via edicts.
+/// Useful for testing validation errors that fire before `collect_incoming_tokens`.
+pub fn build_init_cellpack(lending_id: &AlkaneId, terms: &LoanTerms) -> Cellpack {
+    Cellpack {
+        target: lending_id.clone(),
+        inputs: vec![
+            0,
+            terms.collateral_token.block,
+            terms.collateral_token.tx,
+            terms.collateral_amount,
+            terms.loan_token.block,
+            terms.loan_token.tx,
+            terms.loan_amount,
+            terms.duration_blocks,
+            terms.apr,
+        ],
+    }
+}
+
 /// Debitor takes the loan by providing collateral (opcode 1).
 ///
 /// Sends `terms.collateral_amount` of collateral tokens and receives the loan
