@@ -288,6 +288,24 @@ fn test_take_insufficient_collateral() -> Result<()> {
 }
 
 // ============================================================================
+// ClaimDefaultedCollateral Error Tests
+// ============================================================================
+
+/// Test that ClaimDefaultedCollateral reverts when the deadline has not yet passed.
+#[wasm_bindgen_test]
+fn test_claim_defaulted_collateral_before_deadline() -> Result<()> {
+    let (take_block, ids) = h::setup_to_active_state()?;
+
+    // Loan was taken at DEPLOY_HEIGHT + 2, deadline = (DEPLOY_HEIGHT + 2) + DURATION_BLOCKS.
+    // Attempt claim one block after take — well before the deadline.
+    let block = h::claim_defaulted_collateral(&take_block, DEPLOY_HEIGHT + 3, &ids.lending_contract)?;
+
+    h::assert_revert(&block, "Loan has not defaulted yet - deadline not passed")?;
+    println!("ClaimDefaultedCollateral before deadline correctly rejected");
+    Ok(())
+}
+
+// ============================================================================
 // InitWithLoanOffer Validation Error Tests
 // ============================================================================
 
