@@ -1,3 +1,5 @@
+mod math;
+
 use alkanes_runtime::{auth::AuthenticatedResponder, declare_alkane, message::MessageDispatch, runtime::AlkaneResponder};
 
 #[allow(unused_imports)]
@@ -15,6 +17,7 @@ use alkanes_support::{
 use anyhow::{anyhow, Result};
 use metashrew_support::compat::to_arraybuffer_layout;
 use metashrew_support::index_pointer::KeyValuePointer;
+
 
 /// Lending contract states (Case 2 only: creditor offers loan)
 /// State 0: Uninitialized
@@ -143,26 +146,35 @@ impl LendingContract {
         Ok(context.caller.clone())
     }
 
-    /// Calculate the total repayment amount (principal + interest)
-    /// Interest = principal * apr * (duration_blocks / blocks_per_year) / APR_PRECISION
-    fn calculate_repayment_amount(&self) -> Result<u128> {
-        let principal = self.loan_amount();
-        let apr = self.apr();
-        let duration = self.duration_blocks();
-
-        // Interest calculation with precision handling
-        // interest = principal * apr * duration / (APR_PRECISION * BLOCKS_PER_YEAR)
-        let interest = principal
-            .checked_mul(apr)
-            .ok_or_else(|| anyhow!("Overflow in interest calculation"))?
-            .checked_mul(duration)
-            .ok_or_else(|| anyhow!("Overflow in interest calculation"))?
-            .checked_div(APR_PRECISION * BLOCKS_PER_YEAR)
-            .ok_or_else(|| anyhow!("Division error in interest calculation"))?;
+    /// Pure arithmetic helper: compute repayment = principal + interest.
+    ///
+    /// Uses high-precision math (18 decimal places) to avoid rounding errors
+    /// that could result in zero-interest loans for small principal amounts.
+    /// Called from both `init_with_loan_offer` and `calculate_repayment_amount`.
+    fn compute_repayment(
+        principal: u128,
+        apr: u128,
+        duration: u128,
+    ) -> Result<u128> {
+        let interest = math::precision::calculate_interest_precise(
+            principal,
+            apr,
+            duration,
+        )?;
 
         principal
             .checked_add(interest)
             .ok_or_else(|| anyhow!("Overflow adding interest to principal"))
+    }
+
+    /// Calculate the total repayment amount (principal + interest)
+    /// from the values stored in contract state.
+    fn calculate_repayment_amount(&self) -> Result<u128> {
+        Self::compute_repayment(
+            self.loan_amount(),
+            self.apr(),
+            self.duration_blocks(),
+        )
     }
 
     /// Validate and collect incoming tokens of a specific type
@@ -238,6 +250,12 @@ impl LendingContract {
         if collateral_token == loan_token {
             return Err(anyhow!("Collateral and loan token cannot be the same"));
         }
+
+        // Validate that the repayment amount is calculable without overflow.
+        // Without this check a malicious creditor could craft loan terms where
+        // the interest calculation overflows, making repay_loan always revert.
+        // The debitor would be unable to repay and would lose their collateral.
+        Self::compute_repayment(loan_amount, desired_apr, duration_blocks)?;
 
         // Collect loan tokens from creditor
         let (_, mut response) = self.collect_incoming_tokens(loan_token.clone(), loan_amount)?;
